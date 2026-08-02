@@ -9,6 +9,7 @@ import GameBoard from '../components/GameBoard';
 import ActionPanel from '../components/ActionPanel';
 import MoveHistory from '../components/MoveHistory';
 import SummaryModal from '../components/SummaryModal';
+import AIDifficultyModal from '../components/AIDifficultyModal';
 import { db } from '../lib/firebase';
 
 let socket;
@@ -23,6 +24,7 @@ export default function Page() {
   const [playerRole, setPlayerRole] = useState(null);
   const [roomState, setRoomState] = useState(null);
   const [serverStats, setServerStats] = useState({ onlineUsers: 1, activeGames: 0 });
+  const [isAIModalOpen, setIsAIModalOpen] = useState(false);
   const [errorMsg, setErrorMsg] = useState(null);
 
   useEffect(() => {
@@ -63,10 +65,20 @@ export default function Page() {
     setViewState('LOBBY');
   };
 
-  // Mode 3: Play with AI
+  // Mode 3: Play with AI (Opens Modal)
   const handlePlayAI = () => {
+    setIsAIModalOpen(true);
+  };
+
+  const handleStartAIMatch = ({ difficulty, bluffRate, playerColor }) => {
     if (!socket) return;
-    socket.emit('CREATE_AI_ROOM', { pawnCount: 16, playerName });
+    setIsAIModalOpen(false);
+    socket.emit('CREATE_AI_ROOM', {
+      pawnCount: 16,
+      playerName,
+      bluffRate,
+      playerColor
+    });
   };
 
   // Mode 4: Play with Friends (Private Room)
@@ -207,6 +219,13 @@ export default function Page() {
           <MoveHistory moveHistory={roomState?.moveHistory} />
         </div>
       )}
+
+      {/* AI Difficulty Modal */}
+      <AIDifficultyModal
+        isOpen={isAIModalOpen}
+        onClose={() => setIsAIModalOpen(false)}
+        onStartMatch={handleStartAIMatch}
+      />
 
       {/* Summary Modal */}
       {roomState && roomState.gameOver && (

@@ -103,9 +103,19 @@ app.prepare().then(async () => {
     });
 
     // Create Single Player AI Match
-    socket.on('CREATE_AI_ROOM', ({ pawnCount, playerName }) => {
+    socket.on('CREATE_AI_ROOM', ({ pawnCount, playerName, bluffRate, playerColor }) => {
       const roomCode = 'AI_' + Math.random().toString(36).substring(2, 6).toUpperCase();
       const boardData = createInitialBoard(pawnCount || 16);
+
+      let wPlayer = { id: socket.id, name: playerName || 'You' };
+      let bPlayer = { id: 'AI_BOT', name: 'Shadow Bot (AI)' };
+      let userRole = 'w';
+
+      if (playerColor === 'black' || (playerColor === 'random' && Math.random() < 0.5)) {
+        wPlayer = { id: 'AI_BOT', name: 'Shadow Bot (AI)' };
+        bPlayer = { id: socket.id, name: playerName || 'You' };
+        userRole = 'b';
+      }
 
       rooms[roomCode] = {
         code: roomCode,
@@ -118,11 +128,9 @@ app.prepare().then(async () => {
         scores: { w: 0, b: 0 },
         moveHistory: [],
         previousState: null,
-        players: {
-          w: { id: socket.id, name: playerName || 'You' },
-          b: { id: 'AI_BOT', name: 'Shadow Bot (AI)' }
-        },
+        players: { w: wPlayer, b: bPlayer },
         isAI: true,
+        bluffRate: bluffRate || 0.20,
         gameOver: false,
         summary: null
       };
@@ -130,9 +138,26 @@ app.prepare().then(async () => {
       socket.join(roomCode);
       socket.emit('ROOM_JOINED', {
         roomCode,
-        role: 'w',
+        role: userRole,
         roomState: getPublicRoomState(rooms[roomCode])
       });
+
+      // If AI is White, trigger AI first move
+      if (userRole === 'b') {
+        setTimeout(() => {
+          const aiMove = generateAIMove(rooms[roomCode].board, 'w', rooms[roomCode].bluffRate);
+          if (aiMove) {
+            const aiPiece = rooms[roomCode].board[aiMove.from.row][aiMove.from.col];
+            if (aiPiece) {
+              rooms[roomCode].board[aiMove.to.row][aiMove.to.col] = aiPiece;
+              rooms[roomCode].board[aiMove.from.row][aiMove.from.col] = null;
+              rooms[roomCode].turn = 'b';
+              io.to(roomCode).emit('ROOM_UPDATED', getPublicRoomState(rooms[roomCode]));
+            }
+          }
+        }, 600);
+      }
+
       broadcastStats(io);
     });
 
@@ -247,16 +272,17 @@ app.prepare().then(async () => {
       room.turn = room.turn === 'w' ? 'b' : 'w';
       io.to(roomCode).emit('ROOM_UPDATED', getPublicRoomState(room));
 
-      // Trigger AI turn if room isAI and it's Black's turn
-      if (room.isAI && room.turn === 'b' && !room.gameOver) {
+      // Trigger AI turn if room isAI and it's AI's turn
+      const aiColor = room.players.w.id === 'AI_BOT' ? 'w' : 'b';
+      if (room.isAI && room.turn === aiColor && !room.gameOver) {
         setTimeout(() => {
-          const aiMove = generateAIMove(room.board, 'b', 'medium');
+          const aiMove = generateAIMove(room.board, aiColor, room.bluffRate);
           if (aiMove) {
             const aiPiece = room.board[aiMove.from.row][aiMove.from.col];
             if (aiPiece) {
               room.previousState = {
                 board: JSON.parse(JSON.stringify(room.board)),
-                turn: 'b',
+                turn: aiColor,
                 lastMove: { from: aiMove.from, to: aiMove.to, piece: { ...aiPiece } }
               };
 
@@ -267,19 +293,19 @@ app.prepare().then(async () => {
               room.board[aiMove.from.row][aiMove.from.col] = null;
 
               if (aiCaptured && aiCaptured.type === 'k') {
-                room.scores['b'] += 100;
+                room.scores[aiColor] += 100;
                 room.gameOver = true;
                 room.summary = computeFinalAudit(room.players, room.moveHistory, room.scores);
               }
 
               if (aiRefRes.isLegal && !room.gameOver) {
-                room.scores['b'] += DSP_SCORES.LEGAL_MOVE;
+                room.scores[aiColor] += DSP_SCORES.LEGAL_MOVE;
               }
 
               room.moveHistory.push({
                 id: Date.now(),
                 type: 'MOVE',
-                color: 'b',
+                color: aiColor,
                 from: aiMove.from,
                 to: aiMove.to,
                 piece: aiPiece.type,
@@ -290,7 +316,7 @@ app.prepare().then(async () => {
                 timestamp: new Date().toLocaleTimeString()
               });
 
-              room.turn = 'w';
+              room.turn = aiColor === 'w' ? 'b' : 'w';
               io.to(roomCode).emit('ROOM_UPDATED', getPublicRoomState(room));
             }
           }
