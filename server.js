@@ -141,8 +141,21 @@ app.prepare().then(async () => {
       room.board[to.row][to.col] = piece;
       room.board[from.row][from.col] = null;
 
+      // Check Win Condition 1: King Death (Capturing King piece ends game immediately)
+      if (capturedPiece && capturedPiece.type === 'k') {
+        room.scores[playerRole] += 100;
+        room.gameOver = true;
+        room.summary = computeFinalAudit(room.players, room.moveHistory, room.scores);
+        room.moveHistory.push({
+          id: Date.now(),
+          type: 'SYSTEM',
+          message: `KING CAPTURED! ${playerRole.toUpperCase()} wins by King Death!`,
+          timestamp: new Date().toLocaleTimeString()
+        });
+      }
+
       // Update DSP score for legal move (+5 pts)
-      if (refereeResult.isLegal) {
+      if (refereeResult.isLegal && !room.gameOver) {
         room.scores[playerRole] += DSP_SCORES.LEGAL_MOVE;
       }
 
