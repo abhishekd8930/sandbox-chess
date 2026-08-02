@@ -250,7 +250,7 @@ app.prepare().then(async () => {
       // Trigger AI turn if room isAI and it's Black's turn
       if (room.isAI && room.turn === 'b' && !room.gameOver) {
         setTimeout(() => {
-          const aiMove = generateAIMove(room.board, room.rows, room.cols);
+          const aiMove = generateAIMove(room.board, 'b', 'medium');
           if (aiMove) {
             const aiPiece = room.board[aiMove.from.row][aiMove.from.col];
             if (aiPiece) {
@@ -285,7 +285,7 @@ app.prepare().then(async () => {
                 piece: aiPiece.type,
                 captured: aiCaptured ? aiCaptured.type : null,
                 isLegal: aiRefRes.isLegal,
-                reason: aiRefRes.reason || (aiMove.isBluff ? 'Bluff Attempt' : 'Legal Move'),
+                reason: aiRefRes.reason || (aiMove.isBluff ? 'Sneaky Bluff Attempt' : 'Legal Move'),
                 challenged: false,
                 timestamp: new Date().toLocaleTimeString()
               });
@@ -294,7 +294,7 @@ app.prepare().then(async () => {
               io.to(roomCode).emit('ROOM_UPDATED', getPublicRoomState(room));
             }
           }
-        }, 1200);
+        }, 600);
       }
     });
 
