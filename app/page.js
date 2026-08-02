@@ -8,6 +8,7 @@ import GameBoard from '../components/GameBoard';
 import ActionPanel from '../components/ActionPanel';
 import MoveHistory from '../components/MoveHistory';
 import SummaryModal from '../components/SummaryModal';
+import { db } from '../lib/firebase';
 
 let socket;
 
