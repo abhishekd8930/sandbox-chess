@@ -9,23 +9,33 @@ const port = process.env.PORT || 3000;
 const app = next({ dev, hostname, port });
 const handle = app.getRequestHandler();
 
-// Import ES modules dynamically or via require for helper functions
-let createInitialBoard, isLegalMove, DSP_SCORES, computeFinalAudit;
+let createInitialBoard, isLegalMove, DSP_SCORES, computeFinalAudit, generateAIMove;
 
 async function loadModules() {
   const boardMod = await import('./lib/boardMatrix.js');
   const refereeMod = await import('./lib/shadowReferee.js');
   const scoreMod = await import('./lib/scoreEngine.js');
+  const aiMod = await import('./lib/aiBot.js');
   
   createInitialBoard = boardMod.createInitialBoard;
   isLegalMove = refereeMod.isLegalMove;
   DSP_SCORES = scoreMod.DSP_SCORES;
   computeFinalAudit = scoreMod.computeFinalAudit;
+  generateAIMove = aiMod.generateAIMove;
 }
 
-// In-Memory WebSocket Room Storage
-// rooms[roomCode] = { config, board, rows, cols, files, turn, scores, moveHistory, previousState, players, clocks }
 const rooms = {};
+let waitingMatchmaker = null; // Queue socket ID for Quick Match
+
+function broadcastStats(io) {
+  const connectedUsers = io.sockets.sockets.size;
+  const activeGames = Object.values(rooms).filter(r => !r.gameOver && (r.players.w && r.players.b)).length;
+
+  io.emit('SERVER_STATS_UPDATE', {
+    onlineUsers: connectedUsers,
+    activeGames
+  });
+}
 
 app.prepare().then(async () => {
   await loadModules();
@@ -35,22 +45,103 @@ app.prepare().then(async () => {
   });
 
   const io = new Server(server, {
-    cors: {
-      origin: '*',
-      methods: ['GET', 'POST']
-    }
+    cors: { origin: '*', methods: ['GET', 'POST'] }
   });
 
   io.on('connection', (socket) => {
-    console.log(`[Socket.io] Client connected: ${socket.id}`);
+    broadcastStats(io);
 
-    // Create or Join Room
+    // Quick Matchmaking ("Play Online")
+    socket.on('QUICK_MATCH', ({ playerName }) => {
+      if (waitingMatchmaker && waitingMatchmaker.id !== socket.id && rooms[waitingMatchmaker.roomCode]) {
+        // Pair with waiting player
+        const roomCode = waitingMatchmaker.roomCode;
+        const room = rooms[roomCode];
+        room.players.b = { id: socket.id, name: playerName || 'Player Black' };
+        socket.join(roomCode);
+
+        socket.emit('ROOM_JOINED', {
+          roomCode,
+          role: 'b',
+          roomState: getPublicRoomState(room)
+        });
+
+        io.to(roomCode).emit('ROOM_UPDATED', getPublicRoomState(room));
+        waitingMatchmaker = null;
+        broadcastStats(io);
+      } else {
+        // Create new public room and wait
+        const roomCode = 'MATCH_' + Math.random().toString(36).substring(2, 6).toUpperCase();
+        const boardData = createInitialBoard(16);
+        rooms[roomCode] = {
+          code: roomCode,
+          pawnCount: boardData.totalPawns,
+          board: boardData.board,
+          rows: boardData.rows,
+          cols: boardData.cols,
+          files: boardData.files,
+          turn: 'w',
+          scores: { w: 0, b: 0 },
+          moveHistory: [],
+          previousState: null,
+          players: { w: { id: socket.id, name: playerName || 'Player White' }, b: null },
+          isAI: false,
+          gameOver: false,
+          summary: null
+        };
+
+        socket.join(roomCode);
+        waitingMatchmaker = { id: socket.id, roomCode };
+
+        socket.emit('ROOM_JOINED', {
+          roomCode,
+          role: 'w',
+          roomState: getPublicRoomState(rooms[roomCode])
+        });
+        broadcastStats(io);
+      }
+    });
+
+    // Create Single Player AI Match
+    socket.on('CREATE_AI_ROOM', ({ pawnCount, playerName }) => {
+      const roomCode = 'AI_' + Math.random().toString(36).substring(2, 6).toUpperCase();
+      const boardData = createInitialBoard(pawnCount || 16);
+
+      rooms[roomCode] = {
+        code: roomCode,
+        pawnCount: boardData.totalPawns,
+        board: boardData.board,
+        rows: boardData.rows,
+        cols: boardData.cols,
+        files: boardData.files,
+        turn: 'w',
+        scores: { w: 0, b: 0 },
+        moveHistory: [],
+        previousState: null,
+        players: {
+          w: { id: socket.id, name: playerName || 'You' },
+          b: { id: 'AI_BOT', name: 'Shadow Bot (AI)' }
+        },
+        isAI: true,
+        gameOver: false,
+        summary: null
+      };
+
+      socket.join(roomCode);
+      socket.emit('ROOM_JOINED', {
+        roomCode,
+        role: 'w',
+        roomState: getPublicRoomState(rooms[roomCode])
+      });
+      broadcastStats(io);
+    });
+
+    // Standard Join Room
     socket.on('JOIN_ROOM', ({ roomCode, pawnCount, selectedRole, playerName }) => {
       const code = (roomCode || 'default').toUpperCase();
       socket.join(code);
 
       if (!rooms[code]) {
-        // Initialize room state
         const boardData = createInitialBoard(pawnCount || 16);
         rooms[code] = {
           code,
@@ -61,19 +152,16 @@ app.prepare().then(async () => {
           files: boardData.files,
           turn: 'w',
           scores: { w: 0, b: 0 },
-          moveHistory: [], // Array of moves/challenges
-          previousState: null, // For reverting illegal moves
+          moveHistory: [],
+          previousState: null,
           players: { w: null, b: null },
-          clocks: { w: 300, b: 300 }, // 5-minute clocks
-          timerInterval: null,
+          isAI: false,
           gameOver: false,
           summary: null
         };
       }
 
       const room = rooms[code];
-
-      // Assign player role if available
       let assignedRole = selectedRole;
       if (assignedRole === 'random') {
         assignedRole = !room.players.w ? 'w' : (!room.players.b ? 'b' : 'spectator');
@@ -83,21 +171,8 @@ app.prepare().then(async () => {
         room.players.w = { id: socket.id, name: playerName || 'Player White' };
       } else if (assignedRole === 'b' && !room.players.b) {
         room.players.b = { id: socket.id, name: playerName || 'Player Black' };
-      } else if (assignedRole === 'w' && room.players.w && room.players.w.id !== socket.id) {
-        // Fallback to black if white taken
-        if (!room.players.b) {
-          assignedRole = 'b';
-          room.players.b = { id: socket.id, name: playerName || 'Player Black' };
-        } else {
-          assignedRole = 'spectator';
-        }
-      } else if (assignedRole === 'b' && room.players.b && room.players.b.id !== socket.id) {
-        if (!room.players.w) {
-          assignedRole = 'w';
-          room.players.w = { id: socket.id, name: playerName || 'Player White' };
-        } else {
-          assignedRole = 'spectator';
-        }
+      } else {
+        assignedRole = 'spectator';
       }
 
       socket.emit('ROOM_JOINED', {
@@ -107,14 +182,14 @@ app.prepare().then(async () => {
       });
 
       io.to(code).emit('ROOM_UPDATED', getPublicRoomState(room));
+      broadcastStats(io);
     });
 
-    // Handle Unconstrained DND Move
+    // Handle Unconstrained Piece Move & Trigger AI
     socket.on('MOVE_PIECE', ({ roomCode, from, to, playerRole }) => {
       const room = rooms[roomCode];
       if (!room || room.gameOver) return;
 
-      // Check turn (allow moves if it's player's turn)
       if (room.turn !== playerRole) {
         socket.emit('ERROR_MSG', 'Not your turn!');
         return;
@@ -126,22 +201,19 @@ app.prepare().then(async () => {
         return;
       }
 
-      // Save previous state for challenge rollback
       room.previousState = {
         board: JSON.parse(JSON.stringify(room.board)),
         turn: room.turn,
         lastMove: { from, to, piece: { ...piece } }
       };
 
-      // Backend Shadow Referee evaluates validity silently
       const refereeResult = isLegalMove(room.board, from, to);
-
-      // Perform UNCONSTRAINED board update
       const capturedPiece = room.board[to.row][to.col];
+
       room.board[to.row][to.col] = piece;
       room.board[from.row][from.col] = null;
 
-      // Check Win Condition 1: King Death (Capturing King piece ends game immediately)
+      // King Capture Win Condition
       if (capturedPiece && capturedPiece.type === 'k') {
         room.scores[playerRole] += 100;
         room.gameOver = true;
@@ -154,12 +226,11 @@ app.prepare().then(async () => {
         });
       }
 
-      // Update DSP score for legal move (+5 pts)
       if (refereeResult.isLegal && !room.gameOver) {
         room.scores[playerRole] += DSP_SCORES.LEGAL_MOVE;
       }
 
-      const moveRecord = {
+      room.moveHistory.push({
         id: Date.now(),
         type: 'MOVE',
         color: playerRole,
@@ -171,28 +242,69 @@ app.prepare().then(async () => {
         reason: refereeResult.reason || 'Legal Move',
         challenged: false,
         timestamp: new Date().toLocaleTimeString()
-      };
+      });
 
-      room.moveHistory.push(moveRecord);
-
-      // Switch turn
       room.turn = room.turn === 'w' ? 'b' : 'w';
-
-      // Broadcast room update
       io.to(roomCode).emit('ROOM_UPDATED', getPublicRoomState(room));
+
+      // Trigger AI turn if room isAI and it's Black's turn
+      if (room.isAI && room.turn === 'b' && !room.gameOver) {
+        setTimeout(() => {
+          const aiMove = generateAIMove(room.board, room.rows, room.cols);
+          if (aiMove) {
+            const aiPiece = room.board[aiMove.from.row][aiMove.from.col];
+            if (aiPiece) {
+              room.previousState = {
+                board: JSON.parse(JSON.stringify(room.board)),
+                turn: 'b',
+                lastMove: { from: aiMove.from, to: aiMove.to, piece: { ...aiPiece } }
+              };
+
+              const aiRefRes = isLegalMove(room.board, aiMove.from, aiMove.to);
+              const aiCaptured = room.board[aiMove.to.row][aiMove.to.col];
+
+              room.board[aiMove.to.row][aiMove.to.col] = aiPiece;
+              room.board[aiMove.from.row][aiMove.from.col] = null;
+
+              if (aiCaptured && aiCaptured.type === 'k') {
+                room.scores['b'] += 100;
+                room.gameOver = true;
+                room.summary = computeFinalAudit(room.players, room.moveHistory, room.scores);
+              }
+
+              if (aiRefRes.isLegal && !room.gameOver) {
+                room.scores['b'] += DSP_SCORES.LEGAL_MOVE;
+              }
+
+              room.moveHistory.push({
+                id: Date.now(),
+                type: 'MOVE',
+                color: 'b',
+                from: aiMove.from,
+                to: aiMove.to,
+                piece: aiPiece.type,
+                captured: aiCaptured ? aiCaptured.type : null,
+                isLegal: aiRefRes.isLegal,
+                reason: aiRefRes.reason || (aiMove.isBluff ? 'Bluff Attempt' : 'Legal Move'),
+                challenged: false,
+                timestamp: new Date().toLocaleTimeString()
+              });
+
+              room.turn = 'w';
+              io.to(roomCode).emit('ROOM_UPDATED', getPublicRoomState(room));
+            }
+          }
+        }, 1200);
+      }
     });
 
-    // Handle [MOVE FALSE!] Challenge Engine
+    // Handle Challenge
     socket.on('MOVE_FALSE_CHALLENGE', ({ roomCode, playerRole }) => {
       const room = rooms[roomCode];
       if (!room || room.gameOver || !room.previousState) return;
 
-      // Only non-active player (or challenger) can challenge last move
       const lastMoveRecord = room.moveHistory.filter(m => m.type === 'MOVE').pop();
-      if (!lastMoveRecord || lastMoveRecord.color === playerRole || lastMoveRecord.challenged) {
-        socket.emit('ERROR_MSG', 'Cannot challenge this move.');
-        return;
-      }
+      if (!lastMoveRecord || lastMoveRecord.color === playerRole || lastMoveRecord.challenged) return;
 
       lastMoveRecord.challenged = true;
       const isLastMoveLegal = lastMoveRecord.isLegal;
@@ -200,12 +312,9 @@ app.prepare().then(async () => {
       const challengerColor = playerRole;
 
       if (!isLastMoveLegal) {
-        // --- SUCCESSFUL CHALLENGE (Caught Cheating) ---
-        // Revert board state
         room.board = JSON.parse(JSON.stringify(room.previousState.board));
-        room.turn = room.previousState.turn; // Offender must replay
+        room.turn = room.previousState.turn;
 
-        // Penalize offender (-40 pts), reward challenger (+50 pts)
         room.scores[offenderColor] += DSP_SCORES.CAUGHT_CHEATING_PENALTY;
         room.scores[challengerColor] += DSP_SCORES.SUCCESSFUL_CHALLENGE;
 
@@ -218,12 +327,8 @@ app.prepare().then(async () => {
           message: `MOVE FALSE SUCCESSFUL! ${challengerColor.toUpperCase()} caught ${offenderColor.toUpperCase()} bluffing! Board reverted.`,
           timestamp: new Date().toLocaleTimeString()
         });
-
       } else {
-        // --- FALSE ACCUSATION ---
-        // Penalize challenger (-30 pts), keep board unchanged
         room.scores[challengerColor] += DSP_SCORES.FALSE_ACCUSATION_PENALTY;
-
         room.moveHistory.push({
           id: Date.now(),
           type: 'CHALLENGE',
@@ -235,21 +340,18 @@ app.prepare().then(async () => {
         });
       }
 
-      room.previousState = null; // Clear challenge buffer
+      room.previousState = null;
       io.to(roomCode).emit('ROOM_UPDATED', getPublicRoomState(room));
     });
 
-    // Handle [CHECKMATE!] Declaration
+    // Declare Checkmate
     socket.on('DECLARE_CHECKMATE', ({ roomCode, playerRole }) => {
       const room = rooms[roomCode];
       if (!room || room.gameOver) return;
 
-      // Shadow Referee verifies if opponent king is actually under attack/checkmate
-      // For sandbox chess, any checkmate call is evaluated: +100 if valid, -50 if false declaration
       const opponentColor = playerRole === 'w' ? 'b' : 'w';
-      
-      // Basic check verification: find opponent king
       let opponentKingPos = null;
+
       for (let r = 0; r < room.rows; r++) {
         for (let c = 0; c < room.cols; c++) {
           const piece = room.board[r][c];
@@ -262,7 +364,6 @@ app.prepare().then(async () => {
 
       let isKingUnderAttack = false;
       if (opponentKingPos) {
-        // Check if any of playerRole's pieces can legally reach opponent king square
         for (let r = 0; r < room.rows; r++) {
           for (let c = 0; c < room.cols; c++) {
             const piece = room.board[r][c];
@@ -279,32 +380,17 @@ app.prepare().then(async () => {
       }
 
       if (isKingUnderAttack) {
-        // Valid Checkmate
         room.scores[playerRole] += DSP_SCORES.VALID_CHECKMATE;
         room.gameOver = true;
         room.summary = computeFinalAudit(room.players, room.moveHistory, room.scores);
-        
-        room.moveHistory.push({
-          id: Date.now(),
-          type: 'SYSTEM',
-          message: `CHECKMATE DECLARED BY ${playerRole.toUpperCase()}! (+100 pts)`,
-          timestamp: new Date().toLocaleTimeString()
-        });
       } else {
-        // False Checkmate Declaration
         room.scores[playerRole] += DSP_SCORES.INVALID_CHECKMATE_PENALTY;
-        room.moveHistory.push({
-          id: Date.now(),
-          type: 'SYSTEM',
-          message: `INVALID CHECKMATE CALL BY ${playerRole.toUpperCase()}! (-50 pts penalty)`,
-          timestamp: new Date().toLocaleTimeString()
-        });
       }
 
       io.to(roomCode).emit('ROOM_UPDATED', getPublicRoomState(room));
+      broadcastStats(io);
     });
 
-    // End Game Manual / Resign
     socket.on('RESIGN_GAME', ({ roomCode, playerRole }) => {
       const room = rooms[roomCode];
       if (!room || room.gameOver) return;
@@ -315,10 +401,14 @@ app.prepare().then(async () => {
       room.summary = computeFinalAudit(room.players, room.moveHistory, room.scores);
 
       io.to(roomCode).emit('ROOM_UPDATED', getPublicRoomState(room));
+      broadcastStats(io);
     });
 
     socket.on('disconnect', () => {
-      console.log(`[Socket.io] Client disconnected: ${socket.id}`);
+      if (waitingMatchmaker && waitingMatchmaker.id === socket.id) {
+        waitingMatchmaker = null;
+      }
+      broadcastStats(io);
     });
   });
 
@@ -339,7 +429,6 @@ function getPublicRoomState(room) {
     scores: room.scores,
     moveHistory: room.moveHistory,
     players: room.players,
-    clocks: room.clocks,
     gameOver: room.gameOver,
     summary: room.summary,
     canChallenge: !!(room.moveHistory.length > 0 && room.moveHistory.filter(m => m.type === 'MOVE').pop() && !room.moveHistory.filter(m => m.type === 'MOVE').pop().challenged)

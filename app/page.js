@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import io from 'socket.io-client';
+import LandingPage from '../components/LandingPage';
 import Lobby from '../components/Lobby';
 import ScoreHUD from '../components/ScoreHUD';
 import GameBoard from '../components/GameBoard';
@@ -13,7 +14,7 @@ import { db } from '../lib/firebase';
 let socket;
 
 export default function Page() {
-  const [inLobby, setInLobby] = useState(true);
+  const [viewState, setViewState] = useState('LANDING'); // 'LANDING', 'LOBBY', 'GAME'
   const [playerName, setPlayerName] = useState('Player 1');
   const [roomCode, setRoomCode] = useState('SANDBOX1');
   const [pawnCount, setPawnCount] = useState(16);
@@ -21,15 +22,20 @@ export default function Page() {
 
   const [playerRole, setPlayerRole] = useState(null);
   const [roomState, setRoomState] = useState(null);
+  const [serverStats, setServerStats] = useState({ onlineUsers: 1, activeGames: 0 });
   const [errorMsg, setErrorMsg] = useState(null);
 
   useEffect(() => {
     socket = io();
 
+    socket.on('SERVER_STATS_UPDATE', (stats) => {
+      setServerStats(stats);
+    });
+
     socket.on('ROOM_JOINED', ({ roomCode, role, roomState }) => {
       setPlayerRole(role);
       setRoomState(roomState);
-      setInLobby(false);
+      setViewState('GAME');
     });
 
     socket.on('ROOM_UPDATED', (updatedRoomState) => {
@@ -46,7 +52,31 @@ export default function Page() {
     };
   }, []);
 
-  const handleJoin = () => {
+  // Mode 1: Play Online (Quick Match)
+  const handlePlayOnline = () => {
+    if (!socket) return;
+    socket.emit('QUICK_MATCH', { playerName });
+  };
+
+  // Mode 2: Create Custom Room
+  const handleCreateRoom = () => {
+    setViewState('LOBBY');
+  };
+
+  // Mode 3: Play with AI
+  const handlePlayAI = () => {
+    if (!socket) return;
+    socket.emit('CREATE_AI_ROOM', { pawnCount: 16, playerName });
+  };
+
+  // Mode 4: Play with Friends (Private Room)
+  const handlePlayFriends = () => {
+    const code = Math.random().toString(36).substring(2, 8).toUpperCase();
+    setRoomCode(code);
+    setViewState('LOBBY');
+  };
+
+  const handleJoinLobbyRoom = () => {
     if (!socket) return;
     socket.emit('JOIN_ROOM', {
       roomCode: roomCode || 'SANDBOX1',
@@ -91,26 +121,31 @@ export default function Page() {
   };
 
   const handlePlayAgain = () => {
-    setInLobby(true);
+    setViewState('LANDING');
     setRoomState(null);
   };
 
   return (
     <main className="min-h-screen bg-slate-100 bg-[radial-gradient(ellipse_80%_80%_at_50%_-20%,rgba(14,165,233,0.15),rgba(255,255,255,1))] text-slate-800 p-4 md:p-8 flex flex-col justify-between items-center space-y-6">
       
-      {/* Top Banner / Navbar */}
-      <header className="w-full max-w-4xl flex items-center justify-between border-b border-slate-200 pb-4">
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-600 via-teal-600 to-emerald-600 flex items-center justify-center font-black text-white text-xl shadow-md shadow-blue-500/20">
+      {/* Top Navigation Bar */}
+      <header className="w-full max-w-5xl flex items-center justify-between border-b border-slate-200 pb-4">
+        <div 
+          onClick={() => setViewState('LANDING')}
+          className="flex items-center gap-3 cursor-pointer group"
+        >
+          <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-600 via-teal-600 to-emerald-600 flex items-center justify-center font-black text-white text-xl shadow-md shadow-blue-500/20 group-hover:scale-105 transition-transform">
             ♟
           </div>
           <div>
-            <h1 className="font-extrabold tracking-tight text-lg text-slate-900">SANDBOX CHESS</h1>
+            <h1 className="font-extrabold tracking-tight text-lg text-slate-900 group-hover:text-blue-600 transition-colors">
+              SANDBOX CHESS
+            </h1>
             <p className="text-[10px] text-blue-600 font-mono font-bold">POKER CHESS RULES & UNCONSTRAINED DND</p>
           </div>
         </div>
 
-        {!inLobby && roomState && (
+        {viewState === 'GAME' && roomState && (
           <div className="flex items-center gap-2 bg-white border border-slate-200 px-3 py-1.5 rounded-xl font-mono text-xs text-slate-600 shadow-sm">
             <span>ROOM:</span>
             <span className="font-bold text-blue-600">{roomState.code}</span>
@@ -118,6 +153,15 @@ export default function Page() {
               {roomState.cols}x{roomState.rows} ({roomState.pawnCount} Pawns)
             </span>
           </div>
+        )}
+
+        {viewState !== 'LANDING' && (
+          <button
+            onClick={() => setViewState('LANDING')}
+            className="text-xs font-bold text-slate-500 hover:text-slate-800 transition px-3 py-1.5 rounded-lg border border-slate-200 bg-white"
+          >
+            ← Back to Home
+          </button>
         )}
       </header>
 
@@ -128,8 +172,16 @@ export default function Page() {
         </div>
       )}
 
-      {/* Main Screen View */}
-      {inLobby ? (
+      {/* Dynamic View State Router */}
+      {viewState === 'LANDING' ? (
+        <LandingPage
+          stats={serverStats}
+          onPlayOnline={handlePlayOnline}
+          onCreateRoom={handleCreateRoom}
+          onPlayAI={handlePlayAI}
+          onPlayFriends={handlePlayFriends}
+        />
+      ) : viewState === 'LOBBY' ? (
         <Lobby
           pawnCount={pawnCount}
           setPawnCount={setPawnCount}
@@ -139,15 +191,12 @@ export default function Page() {
           setPlayerName={setPlayerName}
           roomCode={roomCode}
           setRoomCode={setRoomCode}
-          onJoin={handleJoin}
+          onJoin={handleJoinLobbyRoom}
         />
       ) : (
         <div className="w-full max-w-4xl space-y-6 flex flex-col items-center">
-          
           <ScoreHUD roomState={roomState} playerRole={playerRole} />
-
           <GameBoard roomState={roomState} playerRole={playerRole} onMove={handleMove} />
-
           <ActionPanel
             roomState={roomState}
             playerRole={playerRole}
@@ -155,13 +204,11 @@ export default function Page() {
             onCheckmate={handleCheckmate}
             onResign={handleResign}
           />
-
           <MoveHistory moveHistory={roomState?.moveHistory} />
-
         </div>
       )}
 
-      {/* Post-Game Summary Modal */}
+      {/* Summary Modal */}
       {roomState && roomState.gameOver && (
         <SummaryModal
           summary={roomState.summary}
@@ -172,7 +219,7 @@ export default function Page() {
 
       {/* Footer */}
       <footer className="text-center text-[11px] text-slate-500 font-mono font-medium pt-4">
-        Sandbox Chess • Full-Stack Dynamic Matrix & Shadow Referee Engine
+        Sandbox Chess • Real-Time Stats & Multi-Mode Expansion Engine
       </footer>
 
     </main>
